@@ -269,9 +269,14 @@ def build_spectrogram(
     word_window_sec: float,
 ) -> tuple[np.ndarray, dict[str, float | int]]:
     segment_length = segment.shape[0]
+    if freq_max <= freq_min:
+        raise ValueError(f"freq_max must be larger than freq_min: {freq_min} !< {freq_max}")
+
     # Choose STFT parameters so the spectrogram lands directly on 256 time bins and 256 frequency bins
     # without resizing afterwards. Time resolution is controlled by hop_length, frequency resolution by nfft.
-    nfft = max(target_size + 1, int(round(sample_rate * target_size / freq_max)))
+    # The frequency axis is now sized against the requested band width (freq_max - freq_min), not just freq_max.
+    target_band_hz = freq_max - freq_min
+    nfft = max(target_size + 1, int(round(sample_rate * (target_size - 1) / target_band_hz)))
     nperseg = max(8, min(segment_length, nfft))
     hop_length = max(1, math.ceil(max(segment_length - nperseg, 0) / max(target_size - 1, 1)))
     padded_length = nperseg + hop_length * (target_size - 1)
@@ -280,9 +285,15 @@ def build_spectrogram(
     padded_segment = np.pad(segment, (0, pad_width), mode="constant")
     noverlap = nperseg - hop_length
 
-    target_freq_index = min(target_size, nfft // 2)
-    if target_freq_index <= 0:
-        raise ValueError("Computed nfft is too small to build the target frequency axis.")
+    bin_hz = sample_rate / nfft
+    start_freq_index = max(0, int(round(freq_min / bin_hz)))
+    end_freq_index = start_freq_index + target_size - 1
+    max_positive_freq_index = nfft // 2
+    if end_freq_index > max_positive_freq_index:
+        raise ValueError(
+            "Computed nfft is too small to cover the requested frequency band: "
+            f"start_idx={start_freq_index}, end_idx={end_freq_index}, max_idx={max_positive_freq_index}"
+        )
 
     _, _, sxx = signal.spectrogram(
         padded_segment,
@@ -302,8 +313,8 @@ def build_spectrogram(
             f"(segment_length={segment_length}, nperseg={nperseg}, hop={hop_length})"
         )
 
-    # Drop the DC bin (0 Hz) and keep the first 256 positive-frequency bins up to ~freq_max.
-    spec = sxx[1 : target_freq_index + 1, :]
+    # Keep exactly 256 bins starting near freq_min and ending near freq_max.
+    spec = sxx[start_freq_index : end_freq_index + 1, :]
     if spec.shape[0] < target_size:
         raise ValueError(f"Expected at least {target_size} frequency bins but got {spec.shape[0]}")
     spec = spec[:target_size, :]
@@ -314,12 +325,8 @@ def build_spectrogram(
     if active_columns < target_size:
         spec[:, active_columns:] = 0.0
 
-    bin_hz = sample_rate / nfft
-    actual_freq_max = target_size * bin_hz
-    if actual_freq_max + 1e-9 < freq_min:
-        raise ValueError(
-            f"Computed frequency range 0-{actual_freq_max:.4f} Hz does not reach freq_min={freq_min} Hz"
-        )
+    actual_freq_min = start_freq_index * bin_hz
+    actual_freq_max = end_freq_index * bin_hz
 
     # These parameters are written to metadata so downstream users can reconstruct the STFT setup.
     params = {
@@ -330,7 +337,10 @@ def build_spectrogram(
         "padded_length": int(padded_length),
         "pad_width": int(pad_width),
         "active_time_bins": int(active_columns),
+        "start_freq_index": int(start_freq_index),
+        "end_freq_index": int(end_freq_index),
         "freq_bin_hz": float(bin_hz),
+        "actual_freq_min_hz": float(actual_freq_min),
         "actual_freq_max_hz": float(actual_freq_max),
     }
     return spec.astype(np.float32), params
@@ -527,7 +537,10 @@ def process_subject(
                 "padded_length": spec_params["padded_length"],
                 "pad_width": spec_params["pad_width"],
                 "active_time_bins": spec_params["active_time_bins"],
+                "start_freq_index": spec_params["start_freq_index"],
+                "end_freq_index": spec_params["end_freq_index"],
                 "freq_bin_hz": spec_params["freq_bin_hz"],
+                "actual_freq_min_hz": spec_params["actual_freq_min_hz"],
                 "actual_freq_max_hz": spec_params["actual_freq_max_hz"],
                 "spectrogram_shape": "x".join(str(dim) for dim in raw_stacked_spectrogram.shape),
                 "spectrogram_npy_raw_amplitude": str(raw_npy_path),
