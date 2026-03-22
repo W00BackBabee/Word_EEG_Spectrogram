@@ -1,0 +1,42 @@
+# Root folder that contains subject subfolders such as S01, S02, ...
+data_root: Data/Raw_EEG
+# CSV that maps each presented word to its onset time and duration inside each stimulus.
+timing_csv: Data/exp_audio_eeg_timing_info.csv
+# Output root. Inside this folder the script creates one folder per subject.
+output_root: outputs/word_spectrograms
+
+# Notch filter center frequency in Hz.
+notch_freq: 60.0
+# Quality factor for the notch filter. Higher means a narrower notch.
+notch_q: 30.0
+
+# Fixed EEG window length, in seconds, extracted from each word onset.
+word_window_sec: 1.0
+# Additional durations, in milliseconds, to keep visible after the word duration.
+# For example, 100 means "word duration + 100 ms" before zero-masking the rest.
+extra_window_ms_options: [0, 100, 300]
+# DPI used when writing PNG preview images.
+preview_dpi: 256
+
+
+# Minimum frequency represented in the output spectrogram.
+freq_min: 1.0
+# Maximum frequency represented in the output spectrogram.
+freq_max: 50.0
+# Final spectrogram size. The code is written so it lands directly on target_size x target_size.
+target_size: 256
+
+# Set to null to use the sample rate stored in the BrainVision header.
+# Set to a number like 500 or 512 to override the header value.
+sample_rate: null
+
+
+# Use 'all' to process every available subject, or provide a list like [S01, S02].
+subjects: [S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49]
+# Use 'all' to process every word in the timing CSV, or provide a list like [a, rabbit].
+words: [alice, her, that]
+# Use 'all' to process every EEG channel, or provide a list like ["1", "2"] or [Fz, Cz].
+channels: all
+
+# If true, save PNG previews alongside the .npy files.
+save_png: false

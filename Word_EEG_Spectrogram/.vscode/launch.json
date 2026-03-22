@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run EEG Spectrogram Generator",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/generate_eeg_spectrograms.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    }
+  ]
+}
