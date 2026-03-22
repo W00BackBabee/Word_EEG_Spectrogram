@@ -1,3 +1,6 @@
+*IMPORTANT NOTE: 
+The Alice and Wonderland UMichigan dataset has missing eeg channel 29 values for Subjects 01, 05, and 38. 
+
 # EEG Spectrogram Generator
 
 Python program for converting BrainVision EEG recordings into word-level spectrogram datasets aligned to spoken-word onset timing.
