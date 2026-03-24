@@ -266,7 +266,25 @@ def apply_notch_filter(eeg: np.ndarray, sample_rate: float, notch_freq: float, q
     # Apply the notch filter once to the continuous recording before cutting word-level segments.
     b, a = signal.iirnotch(w0=notch_freq, Q=q, fs=sample_rate)
     filtered = signal.filtfilt(b, a, eeg, axis=1)
-    return filtered.astype(np.float32, copy=False)
+    # Standardize each channel on the continuous trace before word-level slicing.
+    channel_means = filtered.mean(axis=1, keepdims=True)
+    channel_stds = filtered.std(axis=1, keepdims=True)
+    safe_channel_stds = np.where(channel_stds > 0, channel_stds, 1.0)
+    z_scored = (filtered - channel_means) / safe_channel_stds
+    return z_scored.astype(np.float32, copy=False)
+
+
+def normalize_to_signed_unit_interval(
+    array: np.ndarray,
+    value_min: float,
+    value_max: float,
+) -> np.ndarray:
+    # Map a shared value range linearly into [-1, 1] for downstream models.
+    if value_max <= value_min:
+        return np.zeros_like(array, dtype=np.float32)
+    normalized_zero_to_one = (array - value_min) / (value_max - value_min)
+    normalized_signed = (normalized_zero_to_one * 2.0) - 1.0
+    return np.clip(normalized_signed, -1.0, 1.0).astype(np.float32, copy=False)
  
 
 def compute_word_sample_bounds(
@@ -498,9 +516,10 @@ def process_subject(
 
     metadata_rows: list[dict[str, object]] = []
     # Normalization is done after all log spectrograms are measured so each latency condition
-    # can use the subject-wide max computed from its own 0/100/300 ms subset.
+    # can use a shared subject-wide min/max range computed from its own 0/100/300 ms subset.
     normalization_queue: list[dict[str, object]] = []
-    subject_log_raw_max_by_latency: dict[int, float] = defaultdict(float)
+    subject_log_raw_max_by_latency: dict[int, float] = defaultdict(lambda: float("-inf"))
+    subject_log_raw_min_by_latency: dict[int, float] = defaultdict(lambda: float("inf"))
     total_samples = filtered.shape[1]
     total_variants = len(timing_df) * len(config.extra_window_ms_options)
     progress_bar = TerminalProgressBar(total_variants, f"{subject_dir.name} variants")
@@ -567,7 +586,11 @@ def process_subject(
             # Stored array shape is always channels x 256 x 256.
             raw_stacked_spectrogram = np.stack(channel_spectrograms, axis=0)
             log_stacked_spectrogram = np.log10(np.maximum(raw_stacked_spectrogram, 0.0) + 1e-12).astype(np.float32)
+            current_log_raw_min = float(np.min(log_stacked_spectrogram))
             current_log_raw_max = float(np.max(log_stacked_spectrogram))
+            subject_log_raw_min_by_latency[extra_window_ms] = min(
+                subject_log_raw_min_by_latency[extra_window_ms], current_log_raw_min
+            )
             subject_log_raw_max_by_latency[extra_window_ms] = max(
                 subject_log_raw_max_by_latency[extra_window_ms], current_log_raw_max
             )
@@ -605,7 +628,9 @@ def process_subject(
                 "actual_freq_min_hz": spec_params["actual_freq_min_hz"],
                 "actual_freq_max_hz": spec_params["actual_freq_max_hz"],
                 "spectrogram_shape": "x".join(str(dim) for dim in raw_stacked_spectrogram.shape),
+                "latency_log_raw_min_amplitude": "",
                 "latency_log_raw_max_amplitude": "",
+                "subject_log_raw_min_amplitude": "",
                 "subject_log_raw_max_amplitude": "",
                 "spectrogram_npy_log_normalized": "",
                 "spectrogram_png_log_normalized": "",
@@ -635,13 +660,12 @@ def process_subject(
     for item in normalization_queue:
         metadata_row = item["metadata_row"]
         extra_window_ms = int(item["extra_window_ms"])
-        log_normalization_denominator = (
-            subject_log_raw_max_by_latency[extra_window_ms]
-            if subject_log_raw_max_by_latency[extra_window_ms] > 0.0
-            else 1.0
-        )
         log_array = np.asarray(item["log_array"], dtype=np.float32)
-        log_normalized_array = (log_array / log_normalization_denominator).astype(np.float32)
+        log_normalized_array = normalize_to_signed_unit_interval(
+            log_array,
+            float(subject_log_raw_min_by_latency[extra_window_ms]),
+            float(subject_log_raw_max_by_latency[extra_window_ms]),
+        )
         log_normalized_npy_path = item["log_normalized_dir"] / f"{item['variant_stem']}_log_norm.npy"
         np.save(log_normalized_npy_path, log_normalized_array)
 
@@ -670,8 +694,14 @@ def process_subject(
             )
             log_normalized_png_path = str(log_normalized_png_file)
 
+        metadata_row["latency_log_raw_min_amplitude"] = float(
+            subject_log_raw_min_by_latency[extra_window_ms]
+        )
         metadata_row["latency_log_raw_max_amplitude"] = float(
             subject_log_raw_max_by_latency[extra_window_ms]
+        )
+        metadata_row["subject_log_raw_min_amplitude"] = float(
+            min(subject_log_raw_min_by_latency.values(), default=0.0)
         )
         metadata_row["subject_log_raw_max_amplitude"] = float(
             max(subject_log_raw_max_by_latency.values(), default=0.0)
@@ -682,16 +712,22 @@ def process_subject(
     metadata_df = pd.DataFrame(metadata_rows)
     metadata_path = subject_output_dir / "metadata.csv"
     metadata_df.to_csv(metadata_path, index=False, quoting=csv.QUOTE_MINIMAL)
-    # Summary keeps one row per subject and records the normalization maxima used for each latency.
+    # Summary keeps one row per subject and records the normalization bounds used for each latency.
     summary_info = {
         "subject": subject_dir.name,
         "num_spectrograms": len(metadata_df),
         "output_dir": str(subject_output_dir),
+        "subject_log_raw_min_amplitude": float(
+            min(subject_log_raw_min_by_latency.values(), default=0.0)
+        ),
         "subject_log_raw_max_amplitude": float(
             max(subject_log_raw_max_by_latency.values(), default=0.0)
         ),
+        "log_raw_min_amplitude_0ms": float(subject_log_raw_min_by_latency.get(0, 0.0)),
         "log_raw_max_amplitude_0ms": float(subject_log_raw_max_by_latency.get(0, 0.0)),
+        "log_raw_min_amplitude_100ms": float(subject_log_raw_min_by_latency.get(100, 0.0)),
         "log_raw_max_amplitude_100ms": float(subject_log_raw_max_by_latency.get(100, 0.0)),
+        "log_raw_min_amplitude_300ms": float(subject_log_raw_min_by_latency.get(300, 0.0)),
         "log_raw_max_amplitude_300ms": float(subject_log_raw_max_by_latency.get(300, 0.0)),
     }
     return metadata_df, summary_info
